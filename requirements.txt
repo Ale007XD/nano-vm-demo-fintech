@@ -1,0 +1,7 @@
+llm-nano-vm>=0.7.5
+stripe>=7.0.0
+fastapi>=0.111.0
+uvicorn>=0.29.0
+python-multipart>=0.0.9
+aiofiles>=23.0.0
+reportlab>=4.1.0
