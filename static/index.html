@@ -318,7 +318,7 @@ input:focus{border-color:var(--accent)}
     <div class="test-hint" id="test-hint">
       Test card: <span>4242 4242 4242 4242</span> · exp: 12/34 · CVC: 123
     </div>
-    <button class="buy-btn" id="buy-btn" onclick="handleBuy()">Generate PDF · $2.99</button>
+    <button class="buy-btn" id="buy-btn" onclick="handleBuy()">Generate PDF · $299.99</button>
   </div>
 </div>
 
@@ -1146,7 +1146,7 @@ function enableBuyBtn() {
   const btn = document.getElementById('buy-btn');
   btn.disabled = false;
   btn.classList.remove('loading');
-  btn.textContent = 'Generate PDF · $2.99';
+  btn.textContent = 'Generate PDF · $299.99';
 }
 
 // ════════════════════════════════════════════════════════════
