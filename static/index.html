@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>nano-vm · Canonical Execution Runtime</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Syne:wght@400;700;800&family=Space+Grotesk:wght@300;400;500;600&display=swap" rel="stylesheet">
@@ -255,15 +255,26 @@ input:focus{border-color:var(--accent)}
 .mbtn.pri{background:var(--accent);color:#070b0f}.mbtn.sec{background:var(--surf2);color:var(--ink);border:1px solid var(--border2)}
 .mbtn:hover{opacity:.85}
 .dims-lbl{font-family:var(--mono);font-size:9px;color:var(--ink3);margin-top:4px}
-  @media (max-width: 768px) {
+
+/* ── МОБИЛЬНАЯ АДАПТАЦИЯ (полная прокрутка) ── */
+@media (max-width: 768px) {
+  html, body {
+    height: auto !important;
+    overflow: auto !important;
+  }
+  body {
+    min-height: 100vh;
+  }
   .app {
-    grid-template-columns: 1fr !important;
-    height: auto;
-    overflow-y: auto;
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
   }
   .col {
     border-right: none;
     border-bottom: 1px solid var(--border);
+    overflow-y: visible !important;
+    height: auto !important;
   }
   .ph, .sec, .eq-bar, .authority-banner, .collapse-panel, .sab-sec, .trace-log, .trace-stats, .fsm-bar, .pipeline-bar {
     padding: 10px 14px;
@@ -281,7 +292,7 @@ input:focus{border-color:var(--accent)}
     height: 36px;
   }
   input, .buy-btn {
-    font-size: 16px !important; /* чтобы не было зума на iOS */
+    font-size: 16px !important;
     padding: 10px;
   }
   .preview-area {
@@ -308,7 +319,7 @@ input:focus{border-color:var(--accent)}
     grid-template-columns: 1fr;
   }
   .logo-sub, .eq-rule {
-    display: none; /* экономия места */
+    display: none;
   }
   .hbadges {
     gap: 4px;
