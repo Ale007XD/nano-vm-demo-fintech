@@ -318,7 +318,7 @@ input:focus{border-color:var(--accent)}
     <div class="test-hint" id="test-hint">
       Test card: <span>4242 4242 4242 4242</span> · exp: 12/34 · CVC: 123
     </div>
-    <button class="buy-btn" id="buy-btn" onclick="handleBuy()">Generate PDF · $299.99</button>
+    <button class="buy-btn" id="buy-btn" onclick="handleBuy()">Generate PDF · $2.99</button>
   </div>
 </div>
 
@@ -858,22 +858,41 @@ function animateCount(elId, from, to, duration) {
 // ════════════════════════════════════════════════════════════
 // SSE HANDLER  [P2] all server strings through esc()
 // ════════════════════════════════════════════════════════════
+// [HANDSHAKE] connectSSE returns Promise that resolves when backend confirms 'connected'.
+// POST /api/run is sent only after this resolves — no race condition possible.
 function connectSSE(execId) {
-  if (sse) { sse.close(); sse = null; }
-  sse = new EventSource(`/api/stream/${encodeURIComponent(execId)}`);
-  sse.onmessage = (e) => {
-    let ev;
-    try { ev = JSON.parse(e.data); } catch(_) { return; }
-    handleEvent(ev);
-  };
-  sse.onerror = () => {
-    // [P13] always reset fsmRunning on SSE error so button re-enables
-    if (fsmRunning) {
-      log('warn','warn','SSE connection interrupted — pipeline state unknown');
-      fsmRunning = false;
-      enableBuyBtn();
-    }
-  };
+  return new Promise((resolve, reject) => {
+    if (sse) { sse.close(); sse = null; }
+
+    const timeout = setTimeout(() => {
+      reject(new Error('SSE handshake timeout (5s) — server did not confirm connection'));
+    }, 5000);
+
+    sse = new EventSource(`/api/stream/${encodeURIComponent(execId)}`);
+
+    sse.onmessage = (e) => {
+      let ev;
+      try { ev = JSON.parse(e.data); } catch(_) { return; }
+
+      // Resolve promise on first 'connected' — only then POST /api/run will fire
+      if (ev.type === 'connected') {
+        clearTimeout(timeout);
+        resolve();
+        return;
+      }
+      handleEvent(ev);
+    };
+
+    sse.onerror = () => {
+      clearTimeout(timeout);
+      // [P13] always reset fsmRunning on SSE error so button re-enables
+      if (fsmRunning) {
+        log('warn','warn','SSE connection interrupted — pipeline state unknown');
+        fsmRunning = false;
+        enableBuyBtn();
+      }
+    };
+  });
 }
 
 function handleEvent(ev) {
@@ -1095,11 +1114,20 @@ async function handleBuy() {
     if (armedSabotage === 'corrupt_hash')  sabFlags['validate_config']        = 'corrupt';
     if (armedSabotage === 'tool_injection') sabFlags['create_payment_intent'] = 'tool_injection';
 
+    // [HANDSHAKE] generate id client-side, open SSE first, then POST
+    executionId = 'exec_' + Array.from(crypto.getRandomValues(new Uint8Array(6)))
+      .map(b => b.toString(16).padStart(2, '0')).join('');
+
+    log('info','info', `Handshake: opening SSE for <code>${esc(executionId)}</code>…`);
+    await connectSSE(executionId);   // resolves only after server sends {type:'connected'}
+    log('info','info', 'SSE handshake confirmed — triggering pipeline');
+
     const resp = await fetch('/api/run', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({
         payment_method_id: paymentMethod.id,
+        execution_id:      executionId,   // server will reuse this id
         config: {
           width_mm:   parseInt(document.getElementById('iw').value) || 3000,
           height_mm:  parseInt(document.getElementById('ih').value) || 1000,
@@ -1114,9 +1142,6 @@ async function handleBuy() {
 
     const data = await resp.json();
     if (!resp.ok) throw new Error(data.detail || 'Backend error');
-
-    executionId = data.execution_id;
-    connectSSE(executionId);
 
     if (armedSabotage === 'double_exec' || armedSabotage === 'reorder') {
       await fetch('/api/sabotage', {
@@ -1146,7 +1171,7 @@ function enableBuyBtn() {
   const btn = document.getElementById('buy-btn');
   btn.disabled = false;
   btn.classList.remove('loading');
-  btn.textContent = 'Generate PDF · $299.99';
+  btn.textContent = 'Generate PDF · $2.99';
 }
 
 // ════════════════════════════════════════════════════════════
