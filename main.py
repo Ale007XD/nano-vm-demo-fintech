@@ -84,12 +84,27 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 # ══════════════════════════════════════════════════════════════════════════════
 
 STRIPE_MOCK_HOST = os.environ.get("STRIPE_MOCK_HOST", "")
-STRIPE_SK        = os.environ.get("STRIPE_SK", "sk_test_mock_demo_key_nanovo7")
-STRIPE_PK        = os.environ.get("STRIPE_PK", "pk_test_mock_demo_key_nanovo7")
+# Keys must be set via environment — no defaults, no hardcodes.
+# For stripe-mock: set in systemd unit or .env (see deploy.sh / .env.example).
+# For real Stripe: use your sk_test_* / sk_live_* keys from dashboard.stripe.com
+STRIPE_SK = os.environ.get("STRIPE_SK", "")
+STRIPE_PK = os.environ.get("STRIPE_PK", "")
+
+if not STRIPE_SK:
+    raise RuntimeError(
+        "STRIPE_SK environment variable is not set. "
+        "For stripe-mock set it in the systemd unit or .env file. "
+        "See .env.example for reference."
+    )
+if not STRIPE_PK:
+    raise RuntimeError(
+        "STRIPE_PK environment variable is not set. "
+        "See .env.example for reference."
+    )
 # [P1] API key — set NANO_VM_API_KEY env var to require auth on mutating endpoints.
 # If unset in demo mode, all requests are allowed (warning logged).
 API_KEY          = os.environ.get("NANO_VM_API_KEY", "")
-AMOUNT_CENTS     = 29999
+AMOUNT_CENTS     = 299
 CURRENCY         = "usd"
 
 # Session store limits
@@ -101,9 +116,11 @@ stripe.api_key = STRIPE_SK
 
 if STRIPE_MOCK_HOST:
     # [P3] Never disable SSL verification with a live key
-    assert "sk_test_" in STRIPE_SK, (
-        "STRIPE_MOCK_HOST is set but STRIPE_SK looks like a live key. Aborting."
-    )
+    if "sk_live_" in STRIPE_SK:
+        raise RuntimeError(
+            "STRIPE_MOCK_HOST is set but STRIPE_SK is a live key — refusing to start. "
+            "Use a test key (sk_test_*) with stripe-mock."
+        )
     stripe.api_base          = STRIPE_MOCK_HOST
     stripe.verify_ssl_certs  = False
     stripe.default_http_client = stripe._http_client.RequestsClient()
@@ -1044,12 +1061,25 @@ class RunRequest(BaseModel):
     payment_method_id: str
     config:            BannerConfig
     sabotage_flags:    dict[str, str] = {}
+    # [HANDSHAKE] client generates execution_id before opening SSE,
+    # then passes it here — guarantees stream is subscribed before pipeline starts.
+    # If omitted, server generates one (backward-compatible).
+    execution_id:      str | None = None
 
     @field_validator("payment_method_id")
     @classmethod
     def _check_pm(cls, v: str) -> str:
         if not v.startswith(("pm_", "pm_mock_")):
             raise ValueError("payment_method_id must start with pm_")
+        return v
+
+    @field_validator("execution_id")
+    @classmethod
+    def _check_exec_id(cls, v: str | None) -> str | None:
+        if v is not None:
+            import re as _re
+            if not _re.match(r'^exec_[a-f0-9]{12}$', v):
+                raise ValueError("execution_id must match exec_<12 hex chars>")
         return v
 
 
@@ -1093,7 +1123,8 @@ async def stripe_pk():
 
 @app.post("/api/run", dependencies=[Depends(require_api_key)])   # [P1]
 async def api_run(req: RunRequest):
-    execution_id = "exec_" + uuid.uuid4().hex[:12]
+    # [HANDSHAKE] use client-provided id (SSE already subscribed) or generate fallback
+    execution_id = req.execution_id or ("exec_" + uuid.uuid4().hex[:12])
     config       = req.config.model_dump()
 
     session                  = ExecutionSession(execution_id, config)

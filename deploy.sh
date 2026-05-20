@@ -1,17 +1,13 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# deploy.sh  — nano-vm Banner Demo · unattended VPS deploy  v1.2.1 (FIXED)
+# deploy.sh  — nano-vm Banner Demo · unattended VPS deploy  v1.2
 #
 # Usage: ./deploy.sh <domain> <email> [api_key]
 #   domain  — domain pointing to this VPS, e.g. demo.nano-vm.io
 #   email   — certbot/Let's Encrypt contact e-mail
 #   api_key — optional NANO_VM_API_KEY; if omitted, app runs in open demo mode
 #
-# Fixes vs v1.2:
-#   [FIX-1] Use SCRIPT_DIR for file paths instead of hardcoded /root/
-#   [FIX-2] Fixed typo: $SM_cksum_URL → $SM_CKSUM_URL
-#
-# Original fixes (v1.2):
+# Fixes vs v1.1:
 #   [F1] stripe-mock runs as APP_USER (nanodemo), not root          (DEPLOY-001)
 #   [F2] SHA256 checksum verification for stripe-mock binary        (SEC-004)
 #   [F3] certbot webroot mode — config stays static during renewal  (DEPLOY-002)
@@ -65,15 +61,11 @@ case "$ARCH" in
   *)       SM_ARCH="linux-amd64" ;;
 esac
 
-# [FIX-1] Get the directory where this script is located
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
 echo "════════════════════════════════════════════"
-echo "  nano-vm Banner Demo — VPS Deploy v1.2.1 (FIXED)"
+echo "  nano-vm Banner Demo — VPS Deploy v1.2"
 echo "  domain  : $DOMAIN"
 echo "  email   : $EMAIL"
 echo "  arch    : $ARCH ($SM_ARCH)"
-echo "  script_dir: $SCRIPT_DIR"
 echo "  api_key : ${API_KEY:+SET (${#API_KEY} chars)}${API_KEY:-NOT SET (open demo mode)}"
 echo "════════════════════════════════════════════"
 
@@ -108,8 +100,8 @@ if curl -fsSL --max-time 60 -o /tmp/stripe-mock.tar.gz "$SM_URL" 2>/dev/null; th
   else
     # Prefer fetching the official checksums file
     CHECKSUM_PASS=0
-    # [FIX-2] Fixed typo: SM_cksum_URL → SM_CKSUM_URL
-    if curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_CKSUM_URL" 2>/dev/null; then
+    if curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_cksum_URL" 2>/dev/null || \
+       curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_CKSUM_URL" 2>/dev/null; then
       if grep -q "$SM_FILE" /tmp/stripe-mock-checksums.txt 2>/dev/null; then
         EXPECTED=$(grep "$SM_FILE" /tmp/stripe-mock-checksums.txt | awk '{print $1}')
         ACTUAL=$(sha256sum /tmp/stripe-mock.tar.gz | awk '{print $1}')
@@ -186,18 +178,15 @@ fi
 
 mkdir -p "$APP_DIR/static" "$LOG_DIR"
 
-# [FIX-1] Copy app files from SCRIPT_DIR instead of hardcoded /root/
-if [[ -f "$SCRIPT_DIR/main.py" ]]; then
-  cp "$SCRIPT_DIR/main.py"           "$APP_DIR/"
-  cp "$SCRIPT_DIR/requirements.txt"  "$APP_DIR/"
-  cp "$SCRIPT_DIR/static/index.html"              "$APP_DIR/static/" 2>/dev/null || true
-  cp "$SCRIPT_DIR/static/stripe-mock-adapter.js"  "$APP_DIR/static/" 2>/dev/null || true
-  echo "  Copied app files from $SCRIPT_DIR/"
+# Copy app files from /root (scp destination)
+if [[ -f /root/main.py ]]; then
+  cp /root/main.py           "$APP_DIR/"
+  cp /root/requirements.txt  "$APP_DIR/"
+  cp /root/static/index.html              "$APP_DIR/static/" 2>/dev/null || true
+  cp /root/static/stripe-mock-adapter.js  "$APP_DIR/static/" 2>/dev/null || true
+  echo "  Copied app files from /root/"
 else
-  echo "  ERROR: $SCRIPT_DIR/main.py not found!"
-  echo "  Ensure you're running this script from the project directory,"
-  echo "  or that main.py, requirements.txt, and static/ are in the same folder as deploy.sh"
-  exit 1
+  echo "  WARNING: /root/main.py not found — ensure you ran: scp main.py root@<VPS>:/root/"
 fi
 
 # [F6] All files owned by nanodemo
@@ -215,9 +204,28 @@ echo "[5/8] Creating systemd service…"
 STRIPE_MOCK_ENV_BLOCK=""
 STRIPE_MOCK_AFTER=""
 if [[ "$STRIPE_MOCK_OK" == "1" ]]; then
+  # Keys come from .env file — never hardcoded in script or systemd unit.
+  # deploy.sh reads .env if present; otherwise user must set STRIPE_SK/STRIPE_PK before running.
+  _STRIPE_SK="${STRIPE_SK:-}"
+  _STRIPE_PK="${STRIPE_PK:-}"
+
+  # Try loading from .env in current dir or /root/.env
+  for _envfile in ".env" "/root/.env" "${APP_DIR}/.env"; do
+    if [[ -f "$_envfile" && -z "$_STRIPE_SK" ]]; then
+      _STRIPE_SK=$(grep -E "^STRIPE_SK=" "$_envfile" | cut -d= -f2- | tr -d "\r\'\"" || true)
+      _STRIPE_PK=$(grep -E "^STRIPE_PK=" "$_envfile" | cut -d= -f2- | tr -d "\r\'\"" || true)
+    fi
+  done
+
+  if [[ -z "$_STRIPE_SK" ]]; then
+    echo "  ERROR: STRIPE_SK is not set. Create .env with STRIPE_SK=sk_test_... or export it."
+    echo "  See .env.example for reference."
+    exit 1
+  fi
+
   STRIPE_MOCK_ENV_BLOCK="Environment=STRIPE_MOCK_HOST=http://127.0.0.1:${STRIPE_MOCK_PORT}
-Environment=STRIPE_SK=sk_test_mock_demo_key_nanovo7
-Environment=STRIPE_PK=pk_test_mock_demo_key_nanovo7"
+Environment=STRIPE_SK=${_STRIPE_SK}
+Environment=STRIPE_PK=${_STRIPE_PK}"
   STRIPE_MOCK_AFTER="stripe-mock.service"
   # [F4] ExecStartPre gives stripe-mock 3 extra seconds to be ready
   EXEC_START_PRE="ExecStartPre=/bin/sleep 3"
@@ -248,6 +256,10 @@ ${EXEC_START_PRE}
 ExecStart=${APP_DIR}/venv/bin/uvicorn main:app --host 127.0.0.1 --port ${APP_PORT} --workers 1
 Restart=always
 RestartSec=5
+# [POST-MORTEM] Guarantee uvicorn workers are killed cleanly — no zombie processes
+KillSignal=SIGQUIT
+TimeoutStopSec=5
+SendSIGKILL=yes
 StandardOutput=append:${LOG_DIR}/app.log
 StandardError=append:${LOG_DIR}/app-err.log
 
@@ -395,7 +407,7 @@ echo "  ufw: SSH + 80 + 443 open"
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════"
-echo "  DEPLOY COMPLETE  v1.2.1 (FIXED)"
+echo "  DEPLOY COMPLETE  v1.2"
 echo "════════════════════════════════════════════"
 echo ""
 if [[ "$SSL_OBTAINED" == "1" ]]; then
@@ -417,7 +429,7 @@ echo "    journalctl -u stripe-mock  -f"
 echo "    tail -f ${LOG_DIR}/app.log"
 echo ""
 echo "  Re-deploy after file changes:"
-echo "    cp main.py requirements.txt $SCRIPT_DIR/ && scp static/* $SCRIPT_DIR/static/ && ssh root@<VPS> 'systemctl restart nano-vm-demo'"
+echo "    scp main.py root@<VPS>:/root/ && ssh root@<VPS> 'cp /root/main.py ${APP_DIR}/ && systemctl restart nano-vm-demo'"
 echo ""
 echo "  SSL renewal (automatic via certbot timer):"
 echo "    systemctl status certbot.timer"
