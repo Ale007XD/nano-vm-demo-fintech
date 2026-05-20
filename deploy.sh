@@ -100,7 +100,7 @@ if curl -fsSL --max-time 60 -o /tmp/stripe-mock.tar.gz "$SM_URL" 2>/dev/null; th
   else
     # Prefer fetching the official checksums file
     CHECKSUM_PASS=0
-    if curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_cksum_URL" 2>/dev/null || \
+    if curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_CKSUM_URL" 2>/dev/null || \
        curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_CKSUM_URL" 2>/dev/null; then
       if grep -q "$SM_FILE" /tmp/stripe-mock-checksums.txt 2>/dev/null; then
         EXPECTED=$(grep "$SM_FILE" /tmp/stripe-mock-checksums.txt | awk '{print $1}')
