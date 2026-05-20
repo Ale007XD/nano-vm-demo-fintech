@@ -11,7 +11,7 @@
 **Живое демо детерминированного fintech-runtime на базе [llm-nano-vm](https://github.com/Ale007XD/nano_vm).**  
 7-шаговый пайплайн генерации PDF-баннера со Stripe-моком, GovernanceEnvelope audit trail, SSE trace log и 6 sabotage injectors.
 
-🔗 **[demo.bannerbot.ru:8444](https://demo.bannerbot.ru:8444)**
+🔗 **[demo.bannerbot.ru:8443](https://demo.bannerbot.ru:8443)**
 
 ---
 
