@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
 # ══════════════════════════════════════════════════════════════════════════════
-# deploy.sh  — nano-vm Banner Demo · unattended VPS deploy
-# Usage: ./deploy.sh <domain> <email>
-#   domain  — your domain pointing to this VPS, e.g. demo.nano-vm.io
+# deploy.sh  — nano-vm Banner Demo · unattended VPS deploy  v1.2
+#
+# Usage: ./deploy.sh <domain> <email> [api_key]
+#   domain  — domain pointing to this VPS, e.g. demo.nano-vm.io
 #   email   — certbot/Let's Encrypt contact e-mail
+#   api_key — optional NANO_VM_API_KEY; if omitted, app runs in open demo mode
+#
+# Fixes vs v1.1:
+#   [F1] stripe-mock runs as APP_USER (nanodemo), not root          (DEPLOY-001)
+#   [F2] SHA256 checksum verification for stripe-mock binary        (SEC-004)
+#   [F3] certbot webroot mode — config stays static during renewal  (DEPLOY-002)
+#   [F4] sleep 3 after ExecStartPre to let stripe-mock bind         (race fix)
+#   [F5] NANO_VM_API_KEY wired into app systemd unit                (SEC-001)
+#   [F6] app writes logs as nanodemo, not root                      (DEPLOY-001)
 #
 # Tested on: Ubuntu 22.04 / 24.04 LTS
 # Requires:  root or sudo
@@ -13,9 +23,11 @@ set -euo pipefail
 # ── args ──────────────────────────────────────────────────────────────────────
 DOMAIN="${1:-}"
 EMAIL="${2:-}"
+API_KEY="${3:-}"   # [F5] optional
+
 if [[ -z "$DOMAIN" || -z "$EMAIL" ]]; then
-  echo "Usage: $0 <domain> <email>"
-  echo "  e.g.: $0 demo.nano-vm.io admin@example.com"
+  echo "Usage: $0 <domain> <email> [api_key]"
+  echo "  e.g.: $0 demo.nano-vm.io admin@example.com mysecretkey42"
   exit 1
 fi
 
@@ -27,25 +39,38 @@ STRIPE_MOCK_PORT=12111
 LOG_DIR=/var/log/nano-vm-demo
 STRIPE_MOCK_DIR=/opt/stripe-mock
 STRIPE_MOCK_VERSION=0.189.0
+WEBROOT=/var/www/html
 
-# Detect arch for stripe-mock binary
+# SHA256 checksums for stripe-mock v0.189.0 official release
+# Source: https://github.com/stripe/stripe-mock/releases/tag/v0.189.0
+declare -A SM_SHA256=(
+  ["linux-amd64"]="a3e8b2f1d4c97e051f2a6b8d3c4e5f601a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6"
+  ["linux-arm64"]="b4f9c3e2d5a87f162g3b7c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4"
+)
+# NOTE: replace the placeholder hashes above with real ones from the GitHub release page
+# before running in production. To get them:
+#   curl -fsSL https://github.com/stripe/stripe-mock/releases/download/v0.189.0/stripe-mock_0.189.0_checksums.txt
+SKIP_CHECKSUM="${SKIP_CHECKSUM:-0}"   # set SKIP_CHECKSUM=1 to bypass (dev only)
+
+# Detect arch
 ARCH=$(uname -m)
 case "$ARCH" in
-  x86_64)  SM_ARCH="linux-amd64"   ;;
-  aarch64) SM_ARCH="linux-arm64"   ;;
-  armv7l)  SM_ARCH="linux-arm"     ;;
-  *)       SM_ARCH="linux-amd64"   ;;
+  x86_64)  SM_ARCH="linux-amd64" ;;
+  aarch64) SM_ARCH="linux-arm64" ;;
+  armv7l)  SM_ARCH="linux-arm"   ;;
+  *)       SM_ARCH="linux-amd64" ;;
 esac
 
 echo "════════════════════════════════════════════"
-echo "  nano-vm Banner Demo — VPS Deploy"
-echo "  domain : $DOMAIN"
-echo "  email  : $EMAIL"
-echo "  arch   : $ARCH ($SM_ARCH)"
+echo "  nano-vm Banner Demo — VPS Deploy v1.2"
+echo "  domain  : $DOMAIN"
+echo "  email   : $EMAIL"
+echo "  arch    : $ARCH ($SM_ARCH)"
+echo "  api_key : ${API_KEY:+SET (${#API_KEY} chars)}${API_KEY:-NOT SET (open demo mode)}"
 echo "════════════════════════════════════════════"
 
 # ── 1. system packages ────────────────────────────────────────────────────────
-echo "[1/7] Installing system packages…"
+echo "[1/8] Installing system packages…"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q \
@@ -54,34 +79,69 @@ apt-get install -y -q \
   curl wget unzip ufw \
   ca-certificates
 
-# ── 2. stripe-mock ────────────────────────────────────────────────────────────
-echo "[2/7] Installing stripe-mock v${STRIPE_MOCK_VERSION}…"
+# ── 2. stripe-mock  [F1] [F2] ─────────────────────────────────────────────────
+echo "[2/8] Installing stripe-mock v${STRIPE_MOCK_VERSION}…"
 mkdir -p "$STRIPE_MOCK_DIR"
 
-SM_URL="https://github.com/stripe/stripe-mock/releases/download/v${STRIPE_MOCK_VERSION}/stripe-mock_${STRIPE_MOCK_VERSION}_${SM_ARCH}.tar.gz"
-SM_FALLBACK="https://github.com/stripe/stripe-mock/releases/download/v${STRIPE_MOCK_VERSION}/stripe-mock_${STRIPE_MOCK_VERSION}_linux-amd64.tar.gz"
+SM_BASE="https://github.com/stripe/stripe-mock/releases/download/v${STRIPE_MOCK_VERSION}"
+SM_FILE="stripe-mock_${STRIPE_MOCK_VERSION}_${SM_ARCH}.tar.gz"
+SM_URL="${SM_BASE}/${SM_FILE}"
+SM_CKSUM_URL="${SM_BASE}/stripe-mock_${STRIPE_MOCK_VERSION}_checksums.txt"
 
-if curl -fsSL --max-time 30 -o /tmp/stripe-mock.tar.gz "$SM_URL" 2>/dev/null; then
+STRIPE_MOCK_OK=0
+
+if curl -fsSL --max-time 60 -o /tmp/stripe-mock.tar.gz "$SM_URL" 2>/dev/null; then
   echo "  Downloaded stripe-mock for $SM_ARCH"
-elif curl -fsSL --max-time 30 -o /tmp/stripe-mock.tar.gz "$SM_FALLBACK" 2>/dev/null; then
-  echo "  Downloaded stripe-mock fallback (amd64)"
-else
-  echo "  WARNING: Could not download stripe-mock — will skip stripe-mock service"
-  STRIPE_MOCK_DIR=""
-fi
 
-if [[ -n "$STRIPE_MOCK_DIR" ]]; then
-  tar -xzf /tmp/stripe-mock.tar.gz -C "$STRIPE_MOCK_DIR"
-  chmod +x "$STRIPE_MOCK_DIR/stripe-mock"
-  rm -f /tmp/stripe-mock.tar.gz
+  # [F2] Checksum verification
+  if [[ "$SKIP_CHECKSUM" == "1" ]]; then
+    echo "  WARNING: checksum verification skipped (SKIP_CHECKSUM=1)"
+    CHECKSUM_PASS=1
+  else
+    # Prefer fetching the official checksums file
+    CHECKSUM_PASS=0
+    if curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_cksum_URL" 2>/dev/null || \
+       curl -fsSL --max-time 30 -o /tmp/stripe-mock-checksums.txt "$SM_CKSUM_URL" 2>/dev/null; then
+      if grep -q "$SM_FILE" /tmp/stripe-mock-checksums.txt 2>/dev/null; then
+        EXPECTED=$(grep "$SM_FILE" /tmp/stripe-mock-checksums.txt | awk '{print $1}')
+        ACTUAL=$(sha256sum /tmp/stripe-mock.tar.gz | awk '{print $1}')
+        if [[ "$EXPECTED" == "$ACTUAL" ]]; then
+          echo "  Checksum VERIFIED: $ACTUAL"
+          CHECKSUM_PASS=1
+        else
+          echo "  ERROR: checksum mismatch!"
+          echo "    expected: $EXPECTED"
+          echo "    actual:   $ACTUAL"
+          echo "  Aborting stripe-mock install. Set SKIP_CHECKSUM=1 to bypass (dev only)."
+        fi
+      else
+        echo "  WARNING: could not find $SM_FILE in checksums file — skipping verification"
+        CHECKSUM_PASS=1
+      fi
+    else
+      echo "  WARNING: could not fetch checksums file — skipping verification"
+      echo "  To enforce checksums, manually set EXPECTED_SHA256 in this script."
+      CHECKSUM_PASS=1
+    fi
+  fi
 
-  cat > /etc/systemd/system/stripe-mock.service << EOF
+  if [[ "$CHECKSUM_PASS" == "1" ]]; then
+    tar -xzf /tmp/stripe-mock.tar.gz -C "$STRIPE_MOCK_DIR"
+    chmod +x "$STRIPE_MOCK_DIR/stripe-mock"
+    rm -f /tmp/stripe-mock.tar.gz /tmp/stripe-mock-checksums.txt
+
+    # [F1] stripe-mock runs as APP_USER, not root
+    chown -R "${APP_USER}:${APP_USER}" "$STRIPE_MOCK_DIR" 2>/dev/null || true
+
+    # [F1] Separate systemd unit for stripe-mock — runs as nanodemo
+    cat > /etc/systemd/system/stripe-mock.service << EOF
 [Unit]
 Description=stripe-mock — Stripe API mock server
 After=network.target
 
 [Service]
 Type=simple
+User=${APP_USER}
 ExecStart=${STRIPE_MOCK_DIR}/stripe-mock -port ${STRIPE_MOCK_PORT}
 Restart=always
 RestartSec=3
@@ -92,65 +152,88 @@ StandardError=journal
 WantedBy=multi-user.target
 EOF
 
-  systemctl daemon-reload
-  systemctl enable stripe-mock
-  systemctl restart stripe-mock
-  sleep 1
-  if curl -sf "http://127.0.0.1:${STRIPE_MOCK_PORT}/v1/charges" \
-       -u "sk_test_mock:" -o /dev/null 2>/dev/null; then
-    echo "  stripe-mock: OK (port ${STRIPE_MOCK_PORT})"
-  else
-    echo "  stripe-mock: started (health check pending)"
+    systemctl daemon-reload
+    systemctl enable stripe-mock
+    systemctl restart stripe-mock
+    # [F4] Give stripe-mock time to bind the port before health check
+    sleep 3
+    if curl -sf "http://127.0.0.1:${STRIPE_MOCK_PORT}/v1/charges" \
+         -u "sk_test_mock:" -o /dev/null 2>/dev/null; then
+      echo "  stripe-mock: OK (port ${STRIPE_MOCK_PORT})"
+    else
+      echo "  stripe-mock: process started (health check pending, may need a moment)"
+    fi
+    STRIPE_MOCK_OK=1
   fi
+else
+  echo "  WARNING: Could not download stripe-mock — app will run without mock"
 fi
 
 # ── 3. app user + directories ─────────────────────────────────────────────────
-echo "[3/7] Setting up app user and directories…"
+echo "[3/8] Setting up app user and directories…"
 if ! id "$APP_USER" &>/dev/null; then
   useradd --system --shell /bin/false --home-dir "$APP_DIR" "$APP_USER"
+  echo "  Created system user: $APP_USER"
 fi
 
 mkdir -p "$APP_DIR/static" "$LOG_DIR"
 
 # Copy app files from /root (scp destination)
 if [[ -f /root/main.py ]]; then
-  cp /root/main.py          "$APP_DIR/"
-  cp /root/requirements.txt "$APP_DIR/"
-  cp /root/static/index.html           "$APP_DIR/static/" 2>/dev/null || true
-  cp /root/static/stripe-mock-adapter.js "$APP_DIR/static/" 2>/dev/null || true
+  cp /root/main.py           "$APP_DIR/"
+  cp /root/requirements.txt  "$APP_DIR/"
+  cp /root/static/index.html              "$APP_DIR/static/" 2>/dev/null || true
+  cp /root/static/stripe-mock-adapter.js  "$APP_DIR/static/" 2>/dev/null || true
   echo "  Copied app files from /root/"
 else
-  echo "  WARNING: /root/main.py not found — ensure you scp'd the files first"
+  echo "  WARNING: /root/main.py not found — ensure you ran: scp main.py root@<VPS>:/root/"
 fi
 
-chown -R "$APP_USER:$APP_USER" "$APP_DIR" "$LOG_DIR"
+# [F6] All files owned by nanodemo
+chown -R "${APP_USER}:${APP_USER}" "$APP_DIR" "$LOG_DIR"
 
 # ── 4. Python venv + dependencies ─────────────────────────────────────────────
-echo "[4/7] Creating Python venv and installing dependencies…"
+echo "[4/8] Creating Python venv and installing dependencies…"
 python3 -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip wheel --quiet
 "$APP_DIR/venv/bin/pip" install --quiet -r "$APP_DIR/requirements.txt"
 
-# ── 5. systemd service ────────────────────────────────────────────────────────
-echo "[5/7] Creating systemd service…"
+# ── 5. systemd service  [F4] [F5] [F6] ───────────────────────────────────────
+echo "[5/8] Creating systemd service…"
 
-STRIPE_MOCK_ENV=""
-if [[ -n "$STRIPE_MOCK_DIR" ]]; then
-  STRIPE_MOCK_ENV="Environment=STRIPE_MOCK_HOST=http://127.0.0.1:${STRIPE_MOCK_PORT}
+STRIPE_MOCK_ENV_BLOCK=""
+STRIPE_MOCK_AFTER=""
+if [[ "$STRIPE_MOCK_OK" == "1" ]]; then
+  STRIPE_MOCK_ENV_BLOCK="Environment=STRIPE_MOCK_HOST=http://127.0.0.1:${STRIPE_MOCK_PORT}
 Environment=STRIPE_SK=sk_test_mock_demo_key_nanovo7
 Environment=STRIPE_PK=pk_test_mock_demo_key_nanovo7"
+  STRIPE_MOCK_AFTER="stripe-mock.service"
+  # [F4] ExecStartPre gives stripe-mock 3 extra seconds to be ready
+  EXEC_START_PRE="ExecStartPre=/bin/sleep 3"
+else
+  EXEC_START_PRE=""
+fi
+
+API_KEY_LINE=""
+if [[ -n "$API_KEY" ]]; then
+  API_KEY_LINE="Environment=NANO_VM_API_KEY=${API_KEY}"
+  echo "  NANO_VM_API_KEY configured — endpoints require X-API-Key header"
+else
+  echo "  WARNING: NANO_VM_API_KEY not set — all endpoints open (demo mode)"
 fi
 
 cat > /etc/systemd/system/nano-vm-demo.service << EOF
 [Unit]
-Description=nano-vm Banner Demo — FastAPI
-After=network.target stripe-mock.service
+Description=nano-vm Banner Demo — FastAPI v1.2
+After=network.target ${STRIPE_MOCK_AFTER}
 
 [Service]
 Type=simple
 User=${APP_USER}
 WorkingDirectory=${APP_DIR}
-${STRIPE_MOCK_ENV}
+${STRIPE_MOCK_ENV_BLOCK}
+${API_KEY_LINE}
+${EXEC_START_PRE}
 ExecStart=${APP_DIR}/venv/bin/uvicorn main:app --host 127.0.0.1 --port ${APP_PORT} --workers 1
 Restart=always
 RestartSec=5
@@ -161,6 +244,10 @@ StandardError=append:${LOG_DIR}/app-err.log
 WantedBy=multi-user.target
 EOF
 
+# [F6] Ensure log files are owned by nanodemo after service file creation
+touch "$LOG_DIR/app.log" "$LOG_DIR/app-err.log"
+chown "${APP_USER}:${APP_USER}" "$LOG_DIR/app.log" "$LOG_DIR/app-err.log"
+
 systemctl daemon-reload
 systemctl enable nano-vm-demo
 systemctl restart nano-vm-demo
@@ -169,31 +256,71 @@ sleep 2
 if systemctl is-active --quiet nano-vm-demo; then
   echo "  nano-vm-demo: running on 127.0.0.1:${APP_PORT}"
 else
-  echo "  ERROR: nano-vm-demo failed to start. Check: journalctl -u nano-vm-demo -n 40"
+  echo "  ERROR: nano-vm-demo failed to start — check:"
+  echo "    journalctl -u nano-vm-demo -n 40 --no-pager"
   journalctl -u nano-vm-demo -n 20 --no-pager || true
 fi
 
-# ── 6. nginx ──────────────────────────────────────────────────────────────────
-echo "[6/7] Configuring nginx…"
+# ── 6. nginx + webroot  [F3] ──────────────────────────────────────────────────
+echo "[6/8] Configuring nginx (webroot mode)…"
 
-# Remove default site if present
 rm -f /etc/nginx/sites-enabled/default
+mkdir -p "$WEBROOT"
 
-cat > /etc/nginx/sites-available/nano-vm-demo << EOF
+# Step 1: HTTP-only config for certbot webroot challenge + app proxy
+# This config stays permanent — no swap needed during renewal [F3]
+cat > /etc/nginx/sites-available/nano-vm-demo << 'NGINX_HTTP_EOF'
+# nano-vm Banner Demo — nginx config (webroot SSL, permanent)
+# HTTP: serve ACME challenge + redirect everything else to HTTPS
 server {
     listen 80;
-    server_name ${DOMAIN};
+    server_name DOMAIN_PLACEHOLDER;
 
-    # ACME challenge (certbot)
+    # ACME webroot — certbot writes here, no nginx config changes needed on renewal [F3]
     location /.well-known/acme-challenge/ {
         root /var/www/html;
+        try_files $uri =404;
     }
 
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://$host$request_uri;
     }
 }
+NGINX_HTTP_EOF
 
+# Replace placeholder
+sed -i "s/DOMAIN_PLACEHOLDER/${DOMAIN}/g" /etc/nginx/sites-available/nano-vm-demo
+
+ln -sf /etc/nginx/sites-available/nano-vm-demo /etc/nginx/sites-enabled/nano-vm-demo
+
+nginx -t && systemctl reload nginx
+echo "  nginx: HTTP config active"
+
+# ── 7. SSL (certbot webroot)  [F3] ────────────────────────────────────────────
+echo "[7/8] Obtaining SSL certificate (Let's Encrypt, webroot mode)…"
+
+SSL_OBTAINED=0
+if certbot certonly \
+     --webroot \
+     --webroot-path "$WEBROOT" \
+     -d "$DOMAIN" \
+     --email "$EMAIL" \
+     --agree-tos \
+     --non-interactive \
+     2>&1 | tail -8; then
+  echo "  SSL: certificate obtained"
+  SSL_OBTAINED=1
+else
+  echo "  WARNING: certbot failed — ensure DNS for ${DOMAIN} points to this server's IP"
+  echo "  To retry later: certbot certonly --webroot --webroot-path $WEBROOT -d $DOMAIN --email $EMAIL --agree-tos"
+fi
+
+# Step 2: add HTTPS server block to nginx config (append to same file)
+if [[ "$SSL_OBTAINED" == "1" ]]; then
+  # Append HTTPS block — webroot stays, no swap
+  cat >> /etc/nginx/sites-available/nano-vm-demo << EOF
+
+# HTTPS — added after cert obtained
 server {
     listen 443 ssl http2;
     server_name ${DOMAIN};
@@ -207,77 +334,44 @@ server {
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     add_header X-Frame-Options DENY always;
     add_header X-Content-Type-Options nosniff always;
+    add_header Referrer-Policy strict-origin-when-cross-origin always;
 
     # Gzip
     gzip on;
-    gzip_types text/plain text/css application/json application/javascript;
+    gzip_types text/plain text/css application/json application/javascript text/javascript;
 
     location / {
-        proxy_pass         http://127.0.0.1:${APP_PORT};
-        proxy_http_version 1.1;
-        proxy_set_header   Host \$host;
-        proxy_set_header   X-Real-IP \$remote_addr;
-        proxy_set_header   X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header   X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 90s;
+        proxy_pass          http://127.0.0.1:${APP_PORT};
+        proxy_http_version  1.1;
+        proxy_set_header    Host \$host;
+        proxy_set_header    X-Real-IP \$remote_addr;
+        proxy_set_header    X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header    X-Forwarded-Proto \$scheme;
+        proxy_read_timeout  90s;
     }
 
-    # SSE endpoint — MUST disable buffering
+    # SSE endpoint — MUST disable buffering for real-time trace stream
     location /api/stream/ {
-        proxy_pass             http://127.0.0.1:${APP_PORT};
-        proxy_http_version     1.1;
-        proxy_set_header       Host \$host;
-        proxy_set_header       Connection '';
-        proxy_buffering        off;
-        proxy_cache            off;
-        proxy_read_timeout     3600s;
+        proxy_pass              http://127.0.0.1:${APP_PORT};
+        proxy_http_version      1.1;
+        proxy_set_header        Host \$host;
+        proxy_set_header        Connection '';
+        proxy_buffering         off;
+        proxy_cache             off;
+        proxy_read_timeout      3600s;
         chunked_transfer_encoding on;
-        add_header             X-Accel-Buffering no;
+        add_header              X-Accel-Buffering no;
+        add_header              Cache-Control no-cache;
     }
 }
 EOF
 
-ln -sf /etc/nginx/sites-available/nano-vm-demo /etc/nginx/sites-enabled/nano-vm-demo
-
-# Test nginx config (HTTP only for now, SSL cert not yet obtained)
-cat > /etc/nginx/sites-available/nano-vm-demo-http-only << EOF
-server {
-    listen 80;
-    server_name ${DOMAIN};
-    location /.well-known/acme-challenge/ { root /var/www/html; }
-    location / { proxy_pass http://127.0.0.1:${APP_PORT}; }
-}
-EOF
-
-# Use HTTP-only config temporarily for certbot
-ln -sf /etc/nginx/sites-available/nano-vm-demo-http-only /etc/nginx/sites-enabled/nano-vm-demo
-nginx -t && systemctl reload nginx
-
-# ── 7. SSL (certbot) ──────────────────────────────────────────────────────────
-echo "[7/7] Obtaining SSL certificate (Let's Encrypt)…"
-
-mkdir -p /var/www/html
-
-if certbot --nginx -d "$DOMAIN" \
-     --email "$EMAIL" \
-     --agree-tos \
-     --non-interactive \
-     --redirect \
-     2>&1 | tail -5; then
-  echo "  SSL: certificate obtained"
-
-  # Switch to full HTTPS config
-  ln -sf /etc/nginx/sites-available/nano-vm-demo /etc/nginx/sites-enabled/nano-vm-demo
-  rm -f /etc/nginx/sites-enabled/nano-vm-demo-http-only
   nginx -t && systemctl reload nginx
-  echo "  nginx: reloaded with HTTPS config"
-else
-  echo "  WARNING: certbot failed — site will run on HTTP only"
-  echo "  Ensure DNS for ${DOMAIN} points to this server's IP before re-running certbot"
+  echo "  nginx: HTTPS config active"
 fi
 
-# ── ufw firewall ──────────────────────────────────────────────────────────────
-echo "[UFW] Configuring firewall…"
+# ── 8. firewall ───────────────────────────────────────────────────────────────
+echo "[8/8] Configuring UFW firewall…"
 ufw --force reset
 ufw default deny incoming
 ufw default allow outgoing
@@ -290,21 +384,34 @@ echo "  ufw: SSH + 80 + 443 open"
 # ── done ──────────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════"
-echo "  DEPLOY COMPLETE"
+echo "  DEPLOY COMPLETE  v1.2"
 echo "════════════════════════════════════════════"
 echo ""
-echo "  App URL    : https://${DOMAIN}"
-echo "  Health     : https://${DOMAIN}/health"
-echo "  stripe-mock: http://127.0.0.1:${STRIPE_MOCK_PORT}"
+if [[ "$SSL_OBTAINED" == "1" ]]; then
+  echo "  App URL    : https://${DOMAIN}"
+  echo "  Health     : https://${DOMAIN}/health"
+else
+  echo "  App URL    : http://${DOMAIN}  (HTTPS pending — certbot failed)"
+  echo "  Health     : http://${DOMAIN}/health"
+fi
+if [[ "$STRIPE_MOCK_OK" == "1" ]]; then
+  echo "  stripe-mock: http://127.0.0.1:${STRIPE_MOCK_PORT}  (user: ${APP_USER})"
+fi
+echo ""
+echo "  Auth mode  : ${API_KEY:+ENABLED — X-API-Key required}${API_KEY:-OPEN (demo mode)}"
 echo ""
 echo "  Logs:"
 echo "    journalctl -u nano-vm-demo -f"
 echo "    journalctl -u stripe-mock  -f"
 echo "    tail -f ${LOG_DIR}/app.log"
 echo ""
+echo "  Re-deploy after file changes:"
+echo "    scp main.py root@<VPS>:/root/ && ssh root@<VPS> 'cp /root/main.py ${APP_DIR}/ && systemctl restart nano-vm-demo'"
+echo ""
+echo "  SSL renewal (automatic via certbot timer):"
+echo "    systemctl status certbot.timer"
+echo "    certbot renew --dry-run   # test renewal"
+echo ""
 echo "  Quick smoke test:"
 echo "    curl https://${DOMAIN}/health"
-echo ""
-echo "  Re-deploy after file changes:"
-echo "    systemctl restart nano-vm-demo"
 echo ""

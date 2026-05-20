@@ -1,7 +1,12 @@
-llm-nano-vm>=0.7.5
-stripe>=7.0.0
-fastapi>=0.111.0
-uvicorn>=0.29.0
-python-multipart>=0.0.9
-aiofiles>=23.0.0
-reportlab>=4.1.0
+# nano-vm Banner Demo v1.2 — pinned dependencies
+# Update procedure:
+#   pip install pip-compile && pip-compile requirements.in
+# or bump manually and test in staging first.
+
+llm-nano-vm==0.7.5
+stripe==7.12.0
+fastapi==0.111.1
+uvicorn==0.30.1
+python-multipart==0.0.9
+aiofiles==23.2.1
+reportlab==4.2.0
