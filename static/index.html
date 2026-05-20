@@ -255,6 +255,72 @@ input:focus{border-color:var(--accent)}
 .mbtn.pri{background:var(--accent);color:#070b0f}.mbtn.sec{background:var(--surf2);color:var(--ink);border:1px solid var(--border2)}
 .mbtn:hover{opacity:.85}
 .dims-lbl{font-family:var(--mono);font-size:9px;color:var(--ink3);margin-top:4px}
+  @media (max-width: 768px) {
+  .app {
+    grid-template-columns: 1fr !important;
+    height: auto;
+    overflow-y: auto;
+  }
+  .col {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+  .ph, .sec, .eq-bar, .authority-banner, .collapse-panel, .sab-sec, .trace-log, .trace-stats, .fsm-bar, .pipeline-bar {
+    padding: 10px 14px;
+  }
+  .row2 {
+    grid-template-columns: 1fr;
+  }
+  .sw, .fb, .sab-btn {
+    width: auto;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+  .sw {
+    width: 36px;
+    height: 36px;
+  }
+  input, .buy-btn {
+    font-size: 16px !important; /* чтобы не было зума на iOS */
+    padding: 10px;
+  }
+  .preview-area {
+    min-height: 200px;
+  }
+  #banner-canvas {
+    max-width: 100%;
+    height: auto;
+  }
+  .pipe-steps {
+    flex-wrap: wrap;
+  }
+  .te {
+    flex-wrap: wrap;
+  }
+  .te-ts {
+    width: auto;
+  }
+  .hash-row {
+    padding-left: 0;
+    flex-wrap: wrap;
+  }
+  .collapse-grid {
+    grid-template-columns: 1fr;
+  }
+  .logo-sub, .eq-rule {
+    display: none; /* экономия места */
+  }
+  .hbadges {
+    gap: 4px;
+  }
+  .badge {
+    font-size: 8px;
+  }
+}
+@media (max-width: 480px) {
+  .cc-val { font-size: 18px; }
+  .step-node { width: 28px; height: 28px; }
+}
 </style>
 </head>
 <body>
