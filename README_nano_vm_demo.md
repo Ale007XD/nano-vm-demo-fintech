@@ -11,7 +11,7 @@
 **Live demo of a deterministic fintech runtime built on [llm-nano-vm](https://github.com/Ale007XD/nano_vm).**  
 A 7-step PDF banner generation pipeline with Stripe mock, GovernanceEnvelope audit trail, SSE trace log, and 6 sabotage injectors.
 
-🔗 **[demo.bannerbot.ru:8443](https://demo.bannerbot.ru:8443)**
+🔗 **[demo.bannerbot.ru:8843](https://demo.bannerbot.ru:8843)**
 
 ---
 
