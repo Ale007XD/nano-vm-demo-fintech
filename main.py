@@ -89,7 +89,7 @@ STRIPE_PK        = os.environ.get("STRIPE_PK", "pk_test_mock_demo_key_nanovo7")
 # [P1] API key — set NANO_VM_API_KEY env var to require auth on mutating endpoints.
 # If unset in demo mode, all requests are allowed (warning logged).
 API_KEY          = os.environ.get("NANO_VM_API_KEY", "")
-AMOUNT_CENTS     = 299
+AMOUNT_CENTS     = 29999
 CURRENCY         = "usd"
 
 # Session store limits
